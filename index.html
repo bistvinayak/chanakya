@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Vinayak Bist — AI Product Architect</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:       #070C16;
+      --surface:  #0C1423;
+      --card:     #111D35;
+      --border:   rgba(99,102,241,0.15);
+      --border-hi:rgba(99,102,241,0.35);
+      --accent:   #4F52E0;
+      --accent-hi:#818CF8;
+      --cyan:     #22D3EE;
+      --t1:       #F1F5F9;
+      --t2:       #94A3B8;
+      --t3:       #475569;
+      --font:     'Space Grotesk', sans-serif;
+      --mono:     'Space Mono', monospace;
+    }
+
+    html, body {
+      background: var(--bg);
+      color: var(--t1);
+      font-family: var(--font);
+      min-height: 100vh;
+      overflow-x: hidden;
+    }
+
+    /* ── Grid noise overlay ── */
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background-image:
+        linear-gradient(rgba(79,82,224,0.03) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(79,82,224,0.03) 1px, transparent 1px);
+      background-size: 48px 48px;
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    /* ── Glow orb ── */
+    .orb {
+      position: fixed;
+      width: 600px;
+      height: 600px;
+      border-radius: 50%;
+      background: radial-gradient(circle, rgba(79,82,224,0.12) 0%, transparent 70%);
+      top: -200px;
+      right: -200px;
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    main {
+      position: relative;
+      z-index: 1;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      max-width: 720px;
+      margin: 0 auto;
+      padding: 60px 32px;
+    }
+
+    /* ── Header ── */
+    .eyebrow {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.15em;
+      color: var(--accent-hi);
+      text-transform: uppercase;
+      margin-bottom: 20px;
+      opacity: 0;
+      animation: fadeUp 0.6s ease 0.1s forwards;
+    }
+
+    h1 {
+      font-size: clamp(42px, 7vw, 72px);
+      font-weight: 700;
+      letter-spacing: -0.03em;
+      line-height: 1.0;
+      color: var(--t1);
+      margin-bottom: 16px;
+      opacity: 0;
+      animation: fadeUp 0.6s ease 0.2s forwards;
+    }
+
+    h1 span {
+      background: linear-gradient(135deg, var(--accent-hi), var(--cyan));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+
+    .tagline {
+      font-size: 18px;
+      color: var(--t2);
+      line-height: 1.6;
+      max-width: 480px;
+      margin-bottom: 52px;
+      opacity: 0;
+      animation: fadeUp 0.6s ease 0.3s forwards;
+    }
+
+    /* ── Projects ── */
+    .section-label {
+      font-family: var(--mono);
+      font-size: 10px;
+      letter-spacing: 0.15em;
+      color: var(--t3);
+      text-transform: uppercase;
+      margin-bottom: 16px;
+      opacity: 0;
+      animation: fadeUp 0.6s ease 0.4s forwards;
+    }
+
+    .project-card {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 20px;
+      background: var(--card);
+      border: 1px solid var(--border-hi);
+      border-radius: 14px;
+      padding: 20px 24px;
+      text-decoration: none;
+      transition: all 0.2s ease;
+      margin-bottom: 12px;
+      opacity: 0;
+      animation: fadeUp 0.6s ease 0.5s forwards;
+    }
+
+    .project-card:hover {
+      border-color: var(--accent-hi);
+      background: #162035;
+      transform: translateY(-2px);
+      box-shadow: 0 8px 32px rgba(79,82,224,0.2);
+    }
+
+    .project-left {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+
+    .project-icon {
+      width: 40px;
+      height: 40px;
+      background: linear-gradient(135deg, var(--accent), #6366F1);
+      border-radius: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 18px;
+      flex-shrink: 0;
+    }
+
+    .project-name {
+      font-size: 16px;
+      font-weight: 600;
+      color: var(--t1);
+      margin-bottom: 3px;
+    }
+
+    .project-desc {
+      font-size: 12px;
+      color: var(--t3);
+    }
+
+    .project-badge {
+      font-family: var(--mono);
+      font-size: 10px;
+      font-weight: 700;
+      color: var(--cyan);
+      background: rgba(34,211,238,0.1);
+      border: 1px solid rgba(34,211,238,0.25);
+      border-radius: 20px;
+      padding: 4px 10px;
+      white-space: nowrap;
+      flex-shrink: 0;
+    }
+
+    .project-badge.soon {
+      color: var(--t3);
+      background: rgba(71,85,105,0.15);
+      border-color: rgba(71,85,105,0.25);
+    }
+
+    /* ── Coming soon projects ── */
+    .coming-soon-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      margin-bottom: 52px;
+      opacity: 0;
+      animation: fadeUp 0.6s ease 0.65s forwards;
+    }
+
+    .teaser-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 14px 16px;
+    }
+
+    .teaser-name {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--t2);
+      margin-bottom: 3px;
+    }
+
+    .teaser-desc {
+      font-size: 11px;
+      color: var(--t3);
+    }
+
+    /* ── Links ── */
+    .links {
+      display: flex;
+      gap: 16px;
+      flex-wrap: wrap;
+      opacity: 0;
+      animation: fadeUp 0.6s ease 0.75s forwards;
+    }
+
+    .link {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 13px;
+      color: var(--t3);
+      text-decoration: none;
+      transition: color 0.15s;
+      font-family: var(--mono);
+    }
+
+    .link:hover { color: var(--accent-hi); }
+
+    .link svg {
+      width: 14px;
+      height: 14px;
+      fill: currentColor;
+      flex-shrink: 0;
+    }
+
+    /* ── Footer ── */
+    footer {
+      position: relative;
+      z-index: 1;
+      text-align: center;
+      padding: 24px 32px;
+      font-family: var(--mono);
+      font-size: 10px;
+      color: var(--t3);
+      letter-spacing: 0.08em;
+    }
+
+    @keyframes fadeUp {
+      from { opacity: 0; transform: translateY(16px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+
+    @media (max-width: 480px) {
+      main { padding: 40px 20px; }
+      .coming-soon-grid { grid-template-columns: 1fr; }
+      h1 { font-size: 36px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="orb"></div>
+
+  <main>
+    <p class="eyebrow">Portfolio · bistvinayak@gmail.com</p>
+
+    <h1>Vinayak<br /><span>Bist</span></h1>
+
+    <p class="tagline">
+      AI Product Architect. I design and build AI-native products — from architecture decisions to shipped experiences.
+    </p>
+
+    <p class="section-label">Projects</p>
+
+    <a href="/projects/chanakya" class="project-card">
+      <div class="project-left">
+        <div class="project-icon">⬡</div>
+        <div>
+          <div class="project-name">Chanakya</div>
+          <div class="project-desc">AI Strategy & Architecture Advisor — enterprise-grade AI recommendations</div>
+        </div>
+      </div>
+      <span class="project-badge">Live ↗</span>
+    </a>
+
+    <div class="coming-soon-grid">
+      <div class="teaser-card">
+        <div class="teaser-name">Project 2</div>
+        <div class="teaser-desc">Coming soon</div>
+      </div>
+      <div class="teaser-card">
+        <div class="teaser-name">Project 3</div>
+        <div class="teaser-desc">Coming soon</div>
+      </div>
+      <div class="teaser-card">
+        <div class="teaser-name">Project 4</div>
+        <div class="teaser-desc">Coming soon</div>
+      </div>
+      <div class="teaser-card">
+        <div class="teaser-name">Project 5</div>
+        <div class="teaser-desc">Coming soon</div>
+      </div>
+    </div>
+
+    <div class="links">
+      <a href="https://github.com/bistvinayak" class="link" target="_blank">
+        <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+          <path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0 0 24 12c0-6.63-5.37-12-12-12z"/>
+        </svg>
+        bistvinayak
+      </a>
+      <a href="https://www.linkedin.com/in/vinayakbist" class="link" target="_blank">
+        <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+          <path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433a2.062 2.062 0 0 1-2.063-2.065 2.064 2.064 0 1 1 2.063 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z"/>
+        </svg>
+        vinayakbist
+      </a>
+      <a href="mailto:bistvinayak@gmail.com" class="link">
+        <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+          <path d="M20 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2zm0 4l-8 5-8-5V6l8 5 8-5v2z"/>
+        </svg>
+        bistvinayak@gmail.com
+      </a>
+    </div>
+  </main>
+
+  <footer>
+    VINAYAK BIST · 2026 · BUILT WITH PURPOSE
+  </footer>
+</body>
+</html>
