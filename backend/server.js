@@ -80,28 +80,46 @@ const stripCodeFences = (text = "") =>
     .replace(/```\s*$/i, "")
     .trim();
 
+const findBalancedJSON = (text, openChar, closeChar) => {
+  const s = String(text || "");
+  for (let start = 0; start < s.length; start++) {
+    if (s[start] !== openChar) continue;
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    for (let i = start; i < s.length; i++) {
+      const ch = s[i];
+      if (escaped) { escaped = false; continue; }
+      if (ch === "\\") { escaped = true; continue; }
+      if (ch === '"') { inString = !inString; continue; }
+      if (inString) continue;
+      if (ch === openChar) depth++;
+      if (ch === closeChar) depth--;
+      if (depth === 0) return s.slice(start, i + 1);
+    }
+  }
+  return null;
+};
+
 const extractJSON = (text) => {
   const s = stripCodeFences(text);
-  try {
-    return JSON.parse(s);
-  } catch (_) {}
+  try { return JSON.parse(s); } catch (_) {}
 
+  const objectCandidate = findBalancedJSON(s, "{", "}");
+  if (objectCandidate) {
+    try { return JSON.parse(objectCandidate); } catch (_) {}
+  }
+
+  const arrayCandidate = findBalancedJSON(s, "[", "]");
+  if (arrayCandidate) {
+    try { return JSON.parse(arrayCandidate); } catch (_) {}
+  }
+
+  // Last resort for responses with pre/postamble.
   const start = s.indexOf("{");
   const end = s.lastIndexOf("}");
   if (start !== -1 && end !== -1 && end > start) {
-    const candidate = s.slice(start, end + 1);
-    try {
-      return JSON.parse(candidate);
-    } catch (_) {}
-  }
-
-  const arrStart = s.indexOf("[");
-  const arrEnd = s.lastIndexOf("]");
-  if (arrStart !== -1 && arrEnd !== -1 && arrEnd > arrStart) {
-    const candidate = s.slice(arrStart, arrEnd + 1);
-    try {
-      return JSON.parse(candidate);
-    } catch (_) {}
+    try { return JSON.parse(s.slice(start, end + 1)); } catch (_) {}
   }
 
   throw new Error("Could not parse JSON from model response.");
@@ -235,7 +253,45 @@ async function callOpenRouter({
   throw lastError || new ProviderError("All LLM providers failed.");
 }
 
+async function repairJSONOutput({ name, system, user, raw, models, maxTokens }) {
+  const repairPrompt = `The previous answer was not valid JSON. Convert it into valid JSON for the original task.
+
+Rules:
+- Return ONLY valid JSON.
+- No markdown, no backticks, no commentary.
+- Preserve business meaning from the invalid output when possible.
+- Do not invent fixed prices or generic defaults.
+- If a field is unknown, use an empty string, empty array, null, or a clear assumption string as appropriate.
+
+Original system instruction:
+${system.slice(0, 2500)}
+
+Original user task:
+${user.slice(0, 4500)}
+
+Invalid output to repair:
+${String(raw || "").slice(0, 7000)}`;
+
+  const repaired = await callOpenRouter({
+    models,
+    maxTokens,
+    temperature: 0,
+    retries: 0,
+    messages: [
+      { role: "system", content: "You are a strict JSON repair engine. Return only parseable JSON." },
+      { role: "user", content: repairPrompt },
+    ],
+  });
+  const fixedRaw = repaired.choices?.[0]?.message?.content || "";
+  const parsed = extractJSON(fixedRaw);
+  if (parsed && typeof parsed === "object") {
+    parsed._meta = { ...(parsed._meta || {}), agent: name, model: repaired._usedModel, repaired: true };
+  }
+  return parsed;
+}
+
 async function callJSONAgent({ name, system, user, models, maxTokens, fallback, temperature = 0.2 }) {
+  let raw = "";
   try {
     const res = await callOpenRouter({
       models,
@@ -246,13 +302,20 @@ async function callJSONAgent({ name, system, user, models, maxTokens, fallback, 
         { role: "user", content: user },
       ],
     });
-    const raw = res.choices?.[0]?.message?.content || "";
+    raw = res.choices?.[0]?.message?.content || "";
     const parsed = extractJSON(raw);
     if (parsed && typeof parsed === "object") {
       parsed._meta = { ...(parsed._meta || {}), agent: name, model: res._usedModel };
     }
     return parsed;
   } catch (err) {
+    if (/parse JSON|valid JSON/i.test(err.message || "") && raw) {
+      try {
+        return await repairJSONOutput({ name, system, user, raw, models, maxTokens });
+      } catch (repairErr) {
+        console.warn(`[${name}] repair failed:`, repairErr.message);
+      }
+    }
     console.warn(`[${name}] falling back:`, err.message);
     return typeof fallback === "function" ? fallback(err) : fallback;
   }
@@ -427,8 +490,8 @@ function fallbackArchitecture(f, inferred) {
 function fallbackCost(f) {
   return {
     models: [
-      { role: "Primary", name: "Configured analysis model", provider: "OpenRouter", why: "Used for architecture reasoning and structured JSON generation", input_cost_per_1m: 0, output_cost_per_1m: 0, best_for: "Architecture analysis" },
-      { role: "Fallback", name: "Configured fallback model", provider: "OpenRouter", why: "Used when the primary model is rate-limited or too expensive", input_cost_per_1m: 0, output_cost_per_1m: 0, best_for: "Continuity and cost control" },
+      { role: "Primary", name: MODEL_CHAINS.analyze[0] || "google/gemini-2.5-flash", provider: "OpenRouter", why: "Used for architecture reasoning and structured JSON generation", input_cost_per_1m: null, output_cost_per_1m: null, best_for: "Architecture analysis" },
+      { role: "Fallback", name: MODEL_CHAINS.analyze[1] || MODEL_CHAINS.light[0] || "openai/gpt-4o-mini", provider: "OpenRouter", why: "Used when the primary model is rate-limited or too expensive", input_cost_per_1m: null, output_cost_per_1m: null, best_for: "Continuity and cost control" },
     ],
     cost_model: {
       assumptions: `Estimates depend on traffic volume (${f.volume || "not specified"}), output length, and number of agent calls per analysis.`,
@@ -545,7 +608,16 @@ async function researchAgent(f, inferred) {
 }
 
 async function architectureAgent(f, inferred, researchClaims) {
-  const schema = `Return this JSON object with keys: executive_summary, recommended_pattern, architecture, risks, next_steps, compliance_notes, differentiator, orchestration_reasoning, agent_llm_map, rag_strategy. Keep every field complete but concise.`;
+  const schema = `Return ONLY valid JSON with keys: executive_summary, recommended_pattern, architecture, risks, next_steps, compliance_notes, differentiator, orchestration_reasoning, agent_llm_map, rag_strategy.
+
+Architecture requirements:
+- architecture.components must contain 4-7 problem-specific components.
+- architecture.data_flow must contain 5-8 domain-specific steps. Do not return null or an empty array.
+- architecture.key_decision must be specific to this business problem.
+- risks must contain concrete domain/compliance/operational risks.
+- next_steps must contain actionable implementation steps with step, priority, effort, and outcome.
+- If RAG is selected, rag_strategy must be a real object, not a string and not null.
+Keep every field complete but concise.`;
   const user = `${schema}\n\nDetected pattern: ${inferred.pattern}\nDetected signals: ${inferred.signals.join(", ") || "none"}\n\n${contextBlock(f)}\n\nResearch evidence summary:\n${safeJSON(researchClaims, 2500)}`;
 
   return callJSONAgent({
@@ -559,13 +631,73 @@ async function architectureAgent(f, inferred, researchClaims) {
 }
 
 async function costAgent(f, architecture) {
-  const user = `Generate ONLY this JSON object: {"models": [...], "cost_model": {...}, "alternatives": [...]}\n\nUse realistic but conservative estimates. Do not overclaim pricing. If exact current prices are unknown, use 0 and explain assumptions.\n\nContext:\n${contextBlock(f)}\n\nArchitecture summary:\n${safeJSON({ recommended_pattern: architecture.recommended_pattern, architecture: architecture.architecture }, 3500)}`;
+  const configuredModels = {
+    analyze: MODEL_CHAINS.analyze,
+    light: MODEL_CHAINS.light,
+    research: MODEL_CHAINS.research,
+  };
+
+  const user = `Generate ONLY valid JSON with exactly this shape:
+{
+  "models": [
+    {
+      "role": "Primary | Fallback | Embedding | Reranker",
+      "name": "specific current model id or product name",
+      "provider": "provider name",
+      "why": "why this model fits THIS problem and constraints",
+      "input_cost_per_1m": 0.0,
+      "output_cost_per_1m": 0.0,
+      "best_for": "specific role in this solution"
+    }
+  ],
+  "cost_model": {
+    "assumptions": "explicit assumptions based on volume, latency, output length, retrieval/tool calls, compliance, and number of section agents",
+    "cost_drivers": ["driver 1", "driver 2", "driver 3"],
+    "per_request": {
+      "p50_usd": 0.0,
+      "p90_usd": 0.0,
+      "breakdown": "brief token/retrieval/agent-call breakdown"
+    },
+    "monthly_estimates": {
+      "low_1k_req": 0.0,
+      "medium_10k_req": 0.0,
+      "high_100k_req": 0.0
+    },
+    "optimization_tips": ["tip 1", "tip 2", "tip 3"]
+  },
+  "alternatives": [
+    {
+      "pattern": "alternative pattern",
+      "tradeoff": "tradeoff",
+      "cost_delta": "relative cost difference",
+      "choose_if": "when this is better"
+    }
+  ]
+}
+
+Intent:
+- This is an architecture advisory product. Costs and model choices must be generated from the business problem, not hardcoded backend defaults.
+- Do NOT return placeholder names such as "Configured analysis model", "Configured fallback model", or "TBD".
+- Use the configured model chain below only as deployment context. You may recommend different model roles if the problem calls for it.
+- Do NOT return 0 pricing for paid models. If exact live pricing is uncertain, provide a realistic conservative estimate and state that assumption.
+- Return 0 only for models explicitly marked free.
+- Make cost estimates problem-specific using volume, latency, compliance, data sources, existing stack, and architecture complexity.
+- Keep the response compact but complete.
+
+Configured model chain:
+${safeJSON(configuredModels, 1200)}
+
+Context:
+${contextBlock(f)}
+
+Architecture summary:
+${safeJSON({ recommended_pattern: architecture.recommended_pattern, architecture: architecture.architecture }, 3500)}`;
 
   return callJSONAgent({
     name: "costAgent",
     models: MODEL_CHAINS.light,
     maxTokens: TOKENS.cost,
-    system: "You are Chanakya's Cost Agent. You estimate model choices, cost drivers, monthly estimates, and architectural alternatives. Return compact valid JSON.",
+    system: "You are Chanakya's Cost Agent. You generate problem-specific model choices, costs, cost drivers, monthly estimates, and alternatives. Never use placeholder model names or backend defaults. Return compact valid JSON.",
     user,
     fallback: () => fallbackCost(f),
   });
@@ -601,6 +733,173 @@ async function diagramToolsAgent(f, architecture, inferred) {
 // NORMALIZATION + MERGE
 // -----------------------------------------------------------------------------
 
+const isBlank = (value) =>
+  value === null ||
+  value === undefined ||
+  (typeof value === "string" && !value.trim()) ||
+  (Array.isArray(value) && value.length === 0) ||
+  (typeof value === "object" && !Array.isArray(value) && Object.keys(value).length === 0);
+
+function hydrateWithDefaults(value, defaults) {
+  if (Array.isArray(defaults)) {
+    return Array.isArray(value) && value.length ? value : defaults;
+  }
+
+  if (defaults && typeof defaults === "object") {
+    const out = { ...(value && typeof value === "object" && !Array.isArray(value) ? value : {}) };
+    for (const [key, defaultValue] of Object.entries(defaults)) {
+      const currentValue = out[key];
+      if (isBlank(currentValue)) {
+        out[key] = defaultValue;
+      } else if (
+        defaultValue &&
+        typeof defaultValue === "object" &&
+        !Array.isArray(defaultValue) &&
+        currentValue &&
+        typeof currentValue === "object" &&
+        !Array.isArray(currentValue)
+      ) {
+        out[key] = hydrateWithDefaults(currentValue, defaultValue);
+      }
+    }
+    return out;
+  }
+
+  return isBlank(value) ? defaults : value;
+}
+
+function hydrateModels(models, fallbackModels) {
+  const hydrated = (asArray(models).length ? asArray(models) : fallbackModels).map((item, idx) => {
+    const fallback = fallbackModels[idx] || fallbackModels[0] || {};
+    const model = hydrateWithDefaults(asObject(item), fallback);
+    const generic = /configured (analysis|fallback|research|light) model/i.test(model.name || "");
+    if (generic) {
+      if (/fallback/i.test(model.role || model.name || "")) {
+        model.name = MODEL_CHAINS.analyze[1] || MODEL_CHAINS.light[0] || MODEL_CHAINS.analyze[0] || fallback.name;
+      } else {
+        model.name = MODEL_CHAINS.analyze[0] || fallback.name;
+      }
+    }
+    model.provider = cleanString(model.provider, "OpenRouter");
+    model.why = cleanString(model.why, fallback.why || "Selected from the configured model chain for this task.");
+    model.best_for = cleanString(model.best_for, fallback.best_for || "AI architecture workflow");
+    model.input_cost_per_1m = Number.isFinite(Number(model.input_cost_per_1m)) ? Number(model.input_cost_per_1m) : null;
+    model.output_cost_per_1m = Number.isFinite(Number(model.output_cost_per_1m)) ? Number(model.output_cost_per_1m) : null;
+    return model;
+  });
+  return hydrated.filter((m) => cleanString(m.name));
+}
+
+function hydrateTools(tools, fallbackTools) {
+  const source = asArray(tools).length ? asArray(tools) : fallbackTools;
+  const hydrated = source.map((item, idx) => {
+    const fallback = fallbackTools[idx] || fallbackTools[idx % fallbackTools.length] || {};
+    const tool = hydrateWithDefaults(asObject(item), fallback);
+    tool.name = cleanString(tool.name, fallback.name || `Recommended tool ${idx + 1}`);
+    tool.category = cleanString(tool.category, fallback.category || "Architecture Support");
+    tool.why = cleanString(tool.why, fallback.why || "Supports the recommended architecture and production operation.");
+    tool.url = cleanString(tool.url, fallback.url || "https://example.com");
+    tool.cost_impact = cleanString(tool.cost_impact, fallback.cost_impact || "Improves reliability or cost visibility.");
+    tool.open_source = typeof tool.open_source === "boolean" ? tool.open_source : !!fallback.open_source;
+    return tool;
+  }).filter((tool) => cleanString(tool.name));
+
+  const deduped = [];
+  const seen = new Set();
+  for (const tool of hydrated) {
+    const key = cleanString(tool.name).toLowerCase();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(tool);
+  }
+  return deduped.length >= 4 ? deduped.slice(0, 6) : fallbackTools;
+}
+
+function hydrateArchitecture(architecture, fallbackArchitectureValue) {
+  const arch = hydrateWithDefaults(asObject(architecture), fallbackArchitectureValue);
+  const fallbackComponents = asArray(fallbackArchitectureValue.components);
+  arch.components = (asArray(arch.components).length ? asArray(arch.components) : fallbackComponents).map((item, idx) => {
+    const fallback = fallbackComponents[idx] || fallbackComponents[idx % fallbackComponents.length] || {};
+    const component = hydrateWithDefaults(asObject(item), fallback);
+    component.name = cleanString(component.name, fallback.name || `Component ${idx + 1}`);
+    component.role = cleanString(component.role, fallback.role || "Supports the AI workflow.");
+    component.recommended_tool = cleanString(component.recommended_tool, fallback.recommended_tool || "TBD");
+    component.alternatives = asArray(component.alternatives).length ? asArray(component.alternatives) : asArray(fallback.alternatives);
+    component.why = cleanString(component.why, fallback.why || "Included because it directly supports the recommended architecture.");
+    return component;
+  });
+  arch.data_flow = asArray(arch.data_flow).length ? asArray(arch.data_flow) : fallbackArchitectureValue.data_flow;
+  arch.key_decision = cleanString(arch.key_decision, fallbackArchitectureValue.key_decision);
+  return arch;
+}
+
+function hydrateBusinessImpact(value, fallbackValue, f, patternName) {
+  const hydrated = hydrateWithDefaults(asObject(value), fallbackValue);
+  const industry = f.industry || "the business";
+  hydrated.headline = cleanString(hydrated.headline, fallbackValue.headline);
+  hydrated.what_changes_for_team = cleanString(hydrated.what_changes_for_team, fallbackValue.what_changes_for_team);
+  hydrated.who_benefits = asArray(hydrated.who_benefits).length ? asArray(hydrated.who_benefits) : fallbackValue.who_benefits;
+  hydrated.use_case_walkthrough = cleanString(hydrated.use_case_walkthrough, fallbackValue.use_case_walkthrough);
+  hydrated.what_ai_decides = cleanString(
+    hydrated.what_ai_decides,
+    `The AI drafts the ${patternName} recommendation, identifies relevant data sources, proposes architecture components, estimates implementation tradeoffs, and flags operational risks for ${industry}.`
+  );
+  hydrated.what_human_decides = cleanString(
+    hydrated.what_human_decides,
+    "Humans approve client-facing recommendations, compliance posture, budget, rollout scope, and any decision that creates business or regulatory accountability."
+  );
+  hydrated.success_metrics = asArray(hydrated.success_metrics).length ? asArray(hydrated.success_metrics) : fallbackValue.success_metrics;
+
+  // Extra aliases are harmless for the current frontend and help future UI versions avoid blanks.
+  hydrated.ai_decides = asArray(hydrated.ai_decides).length ? hydrated.ai_decides : [
+    "Draft meeting-preparation or architecture recommendations",
+    "Rank retrieved evidence and surface risk signals",
+    "Suggest next-best implementation steps",
+  ];
+  hydrated.human_decides = asArray(hydrated.human_decides).length ? hydrated.human_decides : [
+    "Approve final business recommendations",
+    "Resolve compliance or client-impact decisions",
+    "Choose budget, timeline, and rollout scope",
+  ];
+  return hydrated;
+}
+
+function hydrateAgentMap(map, fallbackMap) {
+  const source = asArray(map).length ? asArray(map) : fallbackMap;
+  return source.map((item, idx) => {
+    const fallback = fallbackMap[idx] || fallbackMap[idx % fallbackMap.length] || {};
+    const agent = hydrateWithDefaults(asObject(item), fallback);
+    agent.agent = cleanString(agent.agent, fallback.agent || `Agent ${idx + 1}`);
+    agent.role_in_use_case = cleanString(agent.role_in_use_case, fallback.role_in_use_case || "Generates one focused section of the recommendation.");
+    if (/configured/i.test(agent.llm || "")) {
+      agent.llm = idx === 0 ? MODEL_CHAINS.analyze[0] : (MODEL_CHAINS.research[0] || MODEL_CHAINS.light[0]);
+    }
+    agent.llm = cleanString(agent.llm, idx === 0 ? MODEL_CHAINS.analyze[0] : (MODEL_CHAINS.research[0] || MODEL_CHAINS.light[0]));
+    agent.llm_rationale = cleanString(agent.llm_rationale, fallback.llm_rationale || "Chosen from the configured model chain for reliability and cost control.");
+    agent.tools_used = asArray(agent.tools_used).length ? asArray(agent.tools_used) : asArray(fallback.tools_used);
+    return agent;
+  });
+}
+
+function hydrateRagStrategy(value, fallbackValue, patternName) {
+  if (!patternName.includes("RAG")) return null;
+  return hydrateWithDefaults(asObject(parseMaybeJSON(value)), fallbackValue || {
+    chunking_strategy: "recursive semantic splitting",
+    chunk_size: 512,
+    chunk_overlap: 64,
+    embedding_model: "text-embedding-3-small",
+    embedding_provider: "OpenAI",
+    embedding_cost_per_1m_tokens: 0.02,
+    similarity_metric: "cosine",
+    similarity_threshold: 0.75,
+    top_k: 5,
+    reranking: true,
+    reranker_tool: "Cohere Rerank or Jina Reranker",
+    estimated_cost_per_query_usd: 0.0003,
+    why_this_strategy: "Moderate chunks preserve context while keeping retrieval precise. Reranking improves quality for document-heavy workflows.",
+  });
+}
+
 function normalizeAnalysis({ f, inferred, architecture, cost, business, diagram, research }) {
   const archFallback = fallbackArchitecture(f, inferred);
   const costFallback = fallbackCost(f);
@@ -625,23 +924,26 @@ function normalizeAnalysis({ f, inferred, architecture, cost, business, diagram,
       complexity: cleanString(recommendedPattern.complexity, archFallback.recommended_pattern.complexity),
       time_to_first_value: cleanString(recommendedPattern.time_to_first_value, archFallback.recommended_pattern.time_to_first_value),
     },
-    architecture: Object.keys(asObject(a.architecture)).length ? a.architecture : archFallback.architecture,
-    models: asArray(c.models).length ? asArray(c.models) : costFallback.models,
-    cost_model: Object.keys(asObject(c.cost_model)).length ? c.cost_model : costFallback.cost_model,
+    architecture: hydrateArchitecture(a.architecture, archFallback.architecture),
+    models: hydrateModels(c.models, costFallback.models),
+    cost_model: hydrateWithDefaults(asObject(c.cost_model), costFallback.cost_model),
     alternatives: asArray(c.alternatives).length ? asArray(c.alternatives) : costFallback.alternatives,
     risks: asArray(a.risks).length ? asArray(a.risks) : archFallback.risks,
     next_steps: asArray(a.next_steps).length ? asArray(a.next_steps) : archFallback.next_steps,
-    compliance_notes: cleanString(a.compliance_notes, archFallback.compliance_notes),
+    compliance_notes: cleanString(
+      a.compliance_notes,
+      archFallback.compliance_notes || "No formal compliance constraint was provided; still include audit logs, access control, and data-retention checks before production."
+    ),
     differentiator: cleanString(a.differentiator, archFallback.differentiator),
-    orchestration_reasoning: Object.keys(asObject(a.orchestration_reasoning)).length ? a.orchestration_reasoning : archFallback.orchestration_reasoning,
-    agent_llm_map: asArray(a.agent_llm_map).length ? asArray(a.agent_llm_map) : archFallback.agent_llm_map,
-    rag_strategy: parseMaybeJSON(a.rag_strategy) ?? (patternName.includes("RAG") ? archFallback.rag_strategy : null),
-    business_impact: Object.keys(asObject(b.business_impact)).length ? b.business_impact : businessFallback.business_impact,
+    orchestration_reasoning: hydrateWithDefaults(asObject(a.orchestration_reasoning), archFallback.orchestration_reasoning),
+    agent_llm_map: hydrateAgentMap(a.agent_llm_map, archFallback.agent_llm_map),
+    rag_strategy: hydrateRagStrategy(a.rag_strategy, archFallback.rag_strategy, patternName),
+    business_impact: hydrateBusinessImpact(b.business_impact, businessFallback.business_impact, f, patternName),
     should_build_ai: parseMaybeJSON(b.should_build_ai) ?? businessFallback.should_build_ai,
     swimlane_diagram: cleanString(d.swimlane_diagram, diagramFallback.swimlane_diagram),
     research_backing: asArray(research).length ? asArray(research) : [],
     mermaid_diagram: cleanString(d.mermaid_diagram, diagramFallback.mermaid_diagram),
-    recommended_tools: asArray(d.recommended_tools).length ? asArray(d.recommended_tools) : diagramFallback.recommended_tools,
+    recommended_tools: hydrateTools(d.recommended_tools, diagramFallback.recommended_tools),
     search_queries: asArray(d.search_queries).length ? asArray(d.search_queries) : diagramFallback.search_queries,
   };
 }
